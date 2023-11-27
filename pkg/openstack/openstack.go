@@ -5,6 +5,8 @@ import (
 	"github.com/cuongpiger/k8s-ccm/pkg/metrics"
 	"github.com/cuongpiger/k8s-ccm/pkg/util"
 	"github.com/gophercloud/gophercloud"
+	"github.com/gophercloud/gophercloud/openstack/networking/v2/extensions/portsecurity"
+	neutronports "github.com/gophercloud/gophercloud/openstack/networking/v2/ports"
 	"k8s.io/api/core/v1"
 
 	"github.com/cuongpiger/k8s-ccm/pkg/client"
@@ -115,6 +117,16 @@ type LoadBalancerOpts struct {
 	// revive:enable:var-naming
 }
 
+// LoadBalancer is used for creating and maintaining load balancers
+type LoadBalancer struct {
+	secret        *gophercloud.ServiceClient
+	network       *gophercloud.ServiceClient
+	lb            *gophercloud.ServiceClient
+	opts          LoadBalancerOpts
+	kclient       kubernetes.Interface
+	eventRecorder record.EventRecorder
+}
+
 // LBClass defines the corresponding floating network, floating subnet or internal subnet ID
 type LBClass struct {
 	FloatingNetworkID  string `gcfg:"floating-network-id,omitempty"`
@@ -124,6 +136,11 @@ type LBClass struct {
 	NetworkID          string `gcfg:"network-id,omitempty"`
 	SubnetID           string `gcfg:"subnet-id,omitempty"`
 	MemberSubnetID     string `gcfg:"member-subnet-id,omitempty"`
+}
+
+type PortWithPortSecurity struct {
+	neutronports.Port
+	portsecurity.PortSecurityExt
 }
 
 // AddExtraFlags is called by the main package to add component specific command line flags
@@ -138,6 +155,45 @@ func (os *OpenStack) Initialize(clientBuilder cloudprovider.ControllerClientBuil
 	os.eventBroadcaster = record.NewBroadcaster()
 	os.eventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: os.kclient.CoreV1().Events("")})
 	os.eventRecorder = os.eventBroadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "cloud-provider-openstack"})
+}
+
+// LoadBalancer initializes a LbaasV2 object
+func (os *OpenStack) LoadBalancer() (cloudprovider.LoadBalancer, bool) {
+	klog.V(4).Info("openstack.LoadBalancer() called")
+	if !os.lbOpts.Enabled {
+		klog.V(4).Info("openstack.LoadBalancer() support for LoadBalancer controller is disabled")
+		return nil, false
+	}
+
+	network, err := client.NewNetworkV2(os.provider, os.epOpts)
+	if err != nil {
+		klog.Errorf("Failed to create an OpenStack Network client: %v", err)
+		return nil, false
+	}
+
+	lb, err := client.NewLoadBalancerV2(os.provider, os.epOpts)
+	if err != nil {
+		klog.Errorf("Failed to create an OpenStack LoadBalancer client: %v", err)
+		return nil, false
+	}
+
+	// keymanager client is optional
+	secret, err := client.NewKeyManagerV1(os.provider, os.epOpts)
+	if err != nil {
+		klog.Warningf("Failed to create an OpenStack Secret client: %v", err)
+	}
+
+	// LBaaS v1 is deprecated in the OpenStack Liberty release.
+	// Currently kubernetes OpenStack cloud provider just support LBaaS v2.
+	lbVersion := os.lbOpts.LBVersion
+	if lbVersion != "" && lbVersion != "v2" {
+		klog.Warningf("Config error: currently only support LBaaS v2, unrecognised lb-version \"%v\"", lbVersion)
+		return nil, false
+	}
+
+	klog.V(1).Info("Claiming to support LoadBalancer")
+
+	return &LbaasV2{LoadBalancer{secret, network, lb, os.lbOpts, os.kclient, os.eventRecorder}}, true
 }
 
 // ReadConfig reads values from the cloud.conf
