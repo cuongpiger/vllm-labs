@@ -3,12 +3,17 @@ module github.com/cuongpiger/k8s-ccm
 go 1.20
 
 require (
+	github.com/container-storage-interface/spec v1.8.0
 	github.com/gophercloud/gophercloud v1.6.0
 	github.com/gophercloud/utils v0.0.0-20231010081019-80377eca5d56
+	github.com/hashicorp/go-version v1.6.0
+	github.com/mitchellh/mapstructure v1.5.0
 	github.com/spf13/pflag v1.0.5
 	github.com/stretchr/testify v1.8.2
 	golang.org/x/sys v0.13.0
 	gopkg.in/gcfg.v1 v1.2.3
+	gopkg.in/godo.v2 v2.0.9
+	k8s.io/api v0.28.4
 	k8s.io/apimachinery v0.28.4
 	k8s.io/client-go v0.28.4
 	k8s.io/cloud-provider v0.28.4
@@ -21,6 +26,7 @@ require (
 
 require (
 	github.com/Azure/go-ansiterm v0.0.0-20230124172434-306776ec8161 // indirect
+	github.com/MichaelTJones/walk v0.0.0-20161122175330-4748e29d5718 // indirect
 	github.com/NYTimes/gziphandler v1.1.1 // indirect
 	github.com/antlr/antlr4/runtime/Go/antlr/v4 v4.0.0-20230321174746-8dcc6526cfb1 // indirect
 	github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 // indirect
@@ -57,6 +63,7 @@ require (
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/matttproud/golang_protobuf_extensions v1.0.4 // indirect
+	github.com/mgutz/str v1.2.0 // indirect
 	github.com/mitchellh/go-homedir v1.1.0 // indirect
 	github.com/moby/sys/mountinfo v0.6.2 // indirect
 	github.com/moby/term v0.0.0-20221205130635-1aeaba878587 // indirect
@@ -107,7 +114,6 @@ require (
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
-	k8s.io/api v0.28.4 // indirect
 	k8s.io/apiserver v0.28.4 // indirect
 	k8s.io/component-helpers v0.28.4 // indirect
 	k8s.io/controller-manager v0.28.4 // indirect

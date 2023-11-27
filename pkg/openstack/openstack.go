@@ -1,29 +1,63 @@
+/*
+Copyright 2014 The Kubernetes Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package openstack
 
 import (
+	"context"
 	"fmt"
-	"github.com/cuongpiger/k8s-ccm/pkg/metrics"
-	"github.com/cuongpiger/k8s-ccm/pkg/util"
-	"github.com/gophercloud/gophercloud"
-	"github.com/gophercloud/gophercloud/openstack/networking/v2/extensions/portsecurity"
-	neutronports "github.com/gophercloud/gophercloud/openstack/networking/v2/ports"
-	"k8s.io/api/core/v1"
-
-	"github.com/cuongpiger/k8s-ccm/pkg/client"
-	"github.com/cuongpiger/k8s-ccm/pkg/util/metadata"
-	"github.com/spf13/pflag"
-	"gopkg.in/gcfg.v1"
 	"io"
-	coreinformers "k8s.io/client-go/informers/core/v1"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/kubernetes/scheme"
-	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
-	"k8s.io/client-go/tools/record"
-	cloudprovider "k8s.io/cloud-provider"
-	"k8s.io/klog/v2"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/gophercloud/gophercloud"
+	"github.com/gophercloud/gophercloud/openstack/compute/v2/extensions/availabilityzones"
+	"github.com/gophercloud/gophercloud/openstack/compute/v2/servers"
+	"github.com/gophercloud/gophercloud/openstack/networking/v2/extensions/portsecurity"
+	"github.com/gophercloud/gophercloud/openstack/networking/v2/extensions/trunk_details"
+	neutronports "github.com/gophercloud/gophercloud/openstack/networking/v2/ports"
+	"github.com/spf13/pflag"
+	gcfg "gopkg.in/gcfg.v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
+	cloudprovider "k8s.io/cloud-provider"
+	"k8s.io/klog/v2"
+
+	"github.com/cuongpiger/k8s-ccm/pkg/client"
+	"github.com/cuongpiger/k8s-ccm/pkg/metrics"
+	"github.com/cuongpiger/k8s-ccm/pkg/util"
+	"github.com/cuongpiger/k8s-ccm/pkg/util/errors"
+	"github.com/cuongpiger/k8s-ccm/pkg/util/metadata"
+	openstackutil "github.com/cuongpiger/k8s-ccm/pkg/util/openstack"
+	"k8s.io/api/core/v1"
+	"k8s.io/client-go/informers"
+	coreinformers "k8s.io/client-go/informers/core/v1"
+	"k8s.io/client-go/kubernetes/scheme"
+	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
+	"k8s.io/client-go/tools/record"
+)
+
+const (
+	// ProviderName is the name of the openstack provider
+	ProviderName = "openstack"
+
+	// TypeHostName is the name type of openstack instance
+	TypeHostName   = "hostname"
+	defaultTimeOut = 60 * time.Second
 )
 
 // userAgentData is used to add extra information to the gophercloud user-agent
@@ -35,52 +69,29 @@ var supportedLBProvider = []string{"amphora", "octavia", "ovn"}
 // supportedContainerStore map is used to define supported tls-container-ref store
 var supportedContainerStore = []string{"barbican", "external"}
 
-const (
-	// ProviderName is the name of the openstack provider
-	ProviderName   = "openstack"
-	defaultTimeOut = 60 * time.Second
-)
-
-// RouterOpts is used for Neutron routes
-type RouterOpts struct {
-	RouterID string `gcfg:"router-id"`
+// AddExtraFlags is called by the main package to add component specific command line flags
+func AddExtraFlags(fs *pflag.FlagSet) {
+	fs.StringArrayVar(&userAgentData, "user-agent", nil, "Extra data to add to gophercloud user-agent. Use multiple times to add more than one component.")
 }
 
-// OpenStack is an implementation of cloud provider Interface for OpenStack.
-type OpenStack struct {
-	provider       *gophercloud.ProviderClient
-	epOpts         *gophercloud.EndpointOpts
-	lbOpts         LoadBalancerOpts
-	routeOpts      RouterOpts
-	metadataOpts   metadata.Opts
-	networkingOpts NetworkingOpts
-	// InstanceID of the server where this OpenStack object is instantiated.
-	localInstanceID       string
-	kclient               kubernetes.Interface
-	useV1Instances        bool // TODO: v1 instance apis can be deleted after the v2 is verified enough
-	nodeInformer          coreinformers.NodeInformer
-	nodeInformerHasSynced func() bool
-
-	eventBroadcaster record.EventBroadcaster
-	eventRecorder    record.EventRecorder
+type PortWithTrunkDetails struct {
+	neutronports.Port
+	trunk_details.TrunkDetailsExt
 }
 
-// NetworkingOpts is used for networking settings
-type NetworkingOpts struct {
-	IPv6SupportDisabled bool     `gcfg:"ipv6-support-disabled"`
-	PublicNetworkName   []string `gcfg:"public-network-name"`
-	InternalNetworkName []string `gcfg:"internal-network-name"`
-	AddressSortOrder    string   `gcfg:"address-sort-order"`
+type PortWithPortSecurity struct {
+	neutronports.Port
+	portsecurity.PortSecurityExt
 }
 
-// Config is used to read and store information from the cloud configuration file
-type Config struct {
-	Global            client.AuthOpts
-	LoadBalancer      LoadBalancerOpts
-	LoadBalancerClass map[string]*LBClass
-	Route             RouterOpts
-	Metadata          metadata.Opts
-	Networking        NetworkingOpts
+// LoadBalancer is used for creating and maintaining load balancers
+type LoadBalancer struct {
+	secret        *gophercloud.ServiceClient
+	network       *gophercloud.ServiceClient
+	lb            *gophercloud.ServiceClient
+	opts          LoadBalancerOpts
+	kclient       kubernetes.Interface
+	eventRecorder record.EventRecorder
 }
 
 // LoadBalancerOpts have the options to talk to Neutron LBaaSV2 or Octavia
@@ -117,16 +128,6 @@ type LoadBalancerOpts struct {
 	// revive:enable:var-naming
 }
 
-// LoadBalancer is used for creating and maintaining load balancers
-type LoadBalancer struct {
-	secret        *gophercloud.ServiceClient
-	network       *gophercloud.ServiceClient
-	lb            *gophercloud.ServiceClient
-	opts          LoadBalancerOpts
-	kclient       kubernetes.Interface
-	eventRecorder record.EventRecorder
-}
-
 // LBClass defines the corresponding floating network, floating subnet or internal subnet ID
 type LBClass struct {
 	FloatingNetworkID  string `gcfg:"floating-network-id,omitempty"`
@@ -138,14 +139,68 @@ type LBClass struct {
 	MemberSubnetID     string `gcfg:"member-subnet-id,omitempty"`
 }
 
-type PortWithPortSecurity struct {
-	neutronports.Port
-	portsecurity.PortSecurityExt
+// NetworkingOpts is used for networking settings
+type NetworkingOpts struct {
+	IPv6SupportDisabled bool     `gcfg:"ipv6-support-disabled"`
+	PublicNetworkName   []string `gcfg:"public-network-name"`
+	InternalNetworkName []string `gcfg:"internal-network-name"`
+	AddressSortOrder    string   `gcfg:"address-sort-order"`
 }
 
-// AddExtraFlags is called by the main package to add component specific command line flags
-func AddExtraFlags(fs *pflag.FlagSet) {
-	fs.StringArrayVar(&userAgentData, "user-agent", nil, "Extra data to add to gophercloud user-agent. Use multiple times to add more than one component.")
+// RouterOpts is used for Neutron routes
+type RouterOpts struct {
+	RouterID string `gcfg:"router-id"`
+}
+
+type ServerAttributesExt struct {
+	servers.Server
+	availabilityzones.ServerAvailabilityZoneExt
+}
+
+// OpenStack is an implementation of cloud provider Interface for OpenStack.
+type OpenStack struct {
+	provider       *gophercloud.ProviderClient
+	epOpts         *gophercloud.EndpointOpts
+	lbOpts         LoadBalancerOpts
+	routeOpts      RouterOpts
+	metadataOpts   metadata.Opts
+	networkingOpts NetworkingOpts
+	// InstanceID of the server where this OpenStack object is instantiated.
+	localInstanceID       string
+	kclient               kubernetes.Interface
+	useV1Instances        bool // TODO: v1 instance apis can be deleted after the v2 is verified enough
+	nodeInformer          coreinformers.NodeInformer
+	nodeInformerHasSynced func() bool
+
+	eventBroadcaster record.EventBroadcaster
+	eventRecorder    record.EventRecorder
+}
+
+// Config is used to read and store information from the cloud configuration file
+type Config struct {
+	Global            client.AuthOpts
+	LoadBalancer      LoadBalancerOpts
+	LoadBalancerClass map[string]*LBClass
+	Route             RouterOpts
+	Metadata          metadata.Opts
+	Networking        NetworkingOpts
+}
+
+func init() {
+	metrics.RegisterMetrics("occm")
+
+	cloudprovider.RegisterCloudProvider(ProviderName, func(config io.Reader) (cloudprovider.Interface, error) {
+		cfg, err := ReadConfig(config)
+		if err != nil {
+			klog.Warningf("failed to read config: %v", err)
+			return nil, err
+		}
+		cloud, err := NewOpenStack(cfg)
+		if err != nil {
+			klog.Warningf("New openstack client created failed with config: %v", err)
+		}
+		return cloud, err
+	})
 }
 
 // Initialize passes a Kubernetes clientBuilder interface to the cloud provider
@@ -155,45 +210,6 @@ func (os *OpenStack) Initialize(clientBuilder cloudprovider.ControllerClientBuil
 	os.eventBroadcaster = record.NewBroadcaster()
 	os.eventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: os.kclient.CoreV1().Events("")})
 	os.eventRecorder = os.eventBroadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "cloud-provider-openstack"})
-}
-
-// LoadBalancer initializes a LbaasV2 object
-func (os *OpenStack) LoadBalancer() (cloudprovider.LoadBalancer, bool) {
-	klog.V(4).Info("openstack.LoadBalancer() called")
-	if !os.lbOpts.Enabled {
-		klog.V(4).Info("openstack.LoadBalancer() support for LoadBalancer controller is disabled")
-		return nil, false
-	}
-
-	network, err := client.NewNetworkV2(os.provider, os.epOpts)
-	if err != nil {
-		klog.Errorf("Failed to create an OpenStack Network client: %v", err)
-		return nil, false
-	}
-
-	lb, err := client.NewLoadBalancerV2(os.provider, os.epOpts)
-	if err != nil {
-		klog.Errorf("Failed to create an OpenStack LoadBalancer client: %v", err)
-		return nil, false
-	}
-
-	// keymanager client is optional
-	secret, err := client.NewKeyManagerV1(os.provider, os.epOpts)
-	if err != nil {
-		klog.Warningf("Failed to create an OpenStack Secret client: %v", err)
-	}
-
-	// LBaaS v1 is deprecated in the OpenStack Liberty release.
-	// Currently kubernetes OpenStack cloud provider just support LBaaS v2.
-	lbVersion := os.lbOpts.LBVersion
-	if lbVersion != "" && lbVersion != "v2" {
-		klog.Warningf("Config error: currently only support LBaaS v2, unrecognised lb-version \"%v\"", lbVersion)
-		return nil, false
-	}
-
-	klog.V(1).Info("Claiming to support LoadBalancer")
-
-	return &LbaasV2{LoadBalancer{secret, network, lb, os.lbOpts, os.kclient, os.eventRecorder}}, true
 }
 
 // ReadConfig reads values from the cloud.conf
@@ -257,6 +273,23 @@ func ReadConfig(config io.Reader) (Config, error) {
 	return cfg, err
 }
 
+// caller is a tiny helper for conditional unwind logic
+type caller bool
+
+func newCaller() caller   { return caller(true) }
+func (c *caller) disarm() { *c = false }
+
+func (c *caller) call(f func()) {
+	if *c {
+		f()
+	}
+}
+
+// check opts for OpenStack
+func checkOpenStackOpts(openstackOpts *OpenStack) error {
+	return metadata.CheckMetadataSearchOrder(openstackOpts.metadataOpts.SearchOrder)
+}
+
 // NewOpenStack creates a new new instance of the openstack struct from a config struct
 func NewOpenStack(cfg Config) (*OpenStack, error) {
 	provider, err := client.NewOpenStackClient(&cfg.Global, "openstack-cloud-controller-manager", userAgentData...)
@@ -300,24 +333,175 @@ func NewOpenStack(cfg Config) (*OpenStack, error) {
 	return &os, nil
 }
 
-func init() {
-	metrics.RegisterMetrics("occm")
-
-	cloudprovider.RegisterCloudProvider(ProviderName, func(config io.Reader) (cloudprovider.Interface, error) {
-		cfg, err := ReadConfig(config)
-		if err != nil {
-			klog.Warningf("failed to read config: %v", err)
-			return nil, err
-		}
-		cloud, err := NewOpenStack(cfg)
-		if err != nil {
-			klog.Warningf("New openstack client created failed with config: %v", err)
-		}
-		return cloud, err
-	})
+// Clusters is a no-op
+func (os *OpenStack) Clusters() (cloudprovider.Clusters, bool) {
+	return nil, false
 }
 
-// check opts for OpenStack
-func checkOpenStackOpts(openstackOpts *OpenStack) error {
-	return metadata.CheckMetadataSearchOrder(openstackOpts.metadataOpts.SearchOrder)
+// ProviderName returns the cloud provider ID.
+func (os *OpenStack) ProviderName() string {
+	return ProviderName
+}
+
+// HasClusterID returns true if the cluster has a clusterID
+func (os *OpenStack) HasClusterID() bool {
+	return true
+}
+
+// LoadBalancer initializes a LbaasV2 object
+func (os *OpenStack) LoadBalancer() (cloudprovider.LoadBalancer, bool) {
+	klog.V(4).Info("openstack.LoadBalancer() called")
+	if !os.lbOpts.Enabled {
+		klog.V(4).Info("openstack.LoadBalancer() support for LoadBalancer controller is disabled")
+		return nil, false
+	}
+
+	network, err := client.NewNetworkV2(os.provider, os.epOpts)
+	if err != nil {
+		klog.Errorf("Failed to create an OpenStack Network client: %v", err)
+		return nil, false
+	}
+
+	lb, err := client.NewLoadBalancerV2(os.provider, os.epOpts)
+	if err != nil {
+		klog.Errorf("Failed to create an OpenStack LoadBalancer client: %v", err)
+		return nil, false
+	}
+
+	// keymanager client is optional
+	secret, err := client.NewKeyManagerV1(os.provider, os.epOpts)
+	if err != nil {
+		klog.Warningf("Failed to create an OpenStack Secret client: %v", err)
+	}
+
+	// LBaaS v1 is deprecated in the OpenStack Liberty release.
+	// Currently kubernetes OpenStack cloud provider just support LBaaS v2.
+	lbVersion := os.lbOpts.LBVersion
+	if lbVersion != "" && lbVersion != "v2" {
+		klog.Warningf("Config error: currently only support LBaaS v2, unrecognised lb-version \"%v\"", lbVersion)
+		return nil, false
+	}
+
+	klog.V(1).Info("Claiming to support LoadBalancer")
+
+	return &LbaasV2{LoadBalancer{secret, network, lb, os.lbOpts, os.kclient, os.eventRecorder}}, true
+}
+
+// Zones indicates that we support zones
+func (os *OpenStack) Zones() (cloudprovider.Zones, bool) {
+	klog.V(1).Info("Claiming to support Zones")
+	return os, true
+}
+
+// GetZone returns the current zone
+func (os *OpenStack) GetZone(ctx context.Context) (cloudprovider.Zone, error) {
+	md, err := metadata.Get(os.metadataOpts.SearchOrder)
+	if err != nil {
+		return cloudprovider.Zone{}, err
+	}
+
+	zone := cloudprovider.Zone{
+		FailureDomain: md.AvailabilityZone,
+		Region:        os.epOpts.Region,
+	}
+	klog.V(4).Infof("Current zone is %v", zone)
+	return zone, nil
+}
+
+// GetZoneByProviderID implements Zones.GetZoneByProviderID
+// This is particularly useful in external cloud providers where the kubelet
+// does not initialize node data.
+func (os *OpenStack) GetZoneByProviderID(ctx context.Context, providerID string) (cloudprovider.Zone, error) {
+	instanceID, _, err := instanceIDFromProviderID(providerID)
+	if err != nil {
+		return cloudprovider.Zone{}, err
+	}
+
+	compute, err := client.NewComputeV2(os.provider, os.epOpts)
+	if err != nil {
+		return cloudprovider.Zone{}, err
+	}
+
+	var serverWithAttributesExt ServerAttributesExt
+	mc := metrics.NewMetricContext("server", "get")
+	err = servers.Get(compute, instanceID).ExtractInto(&serverWithAttributesExt)
+	if mc.ObserveRequest(err) != nil {
+		return cloudprovider.Zone{}, err
+	}
+
+	zone := cloudprovider.Zone{
+		FailureDomain: serverWithAttributesExt.AvailabilityZone,
+		Region:        os.epOpts.Region,
+	}
+	klog.V(4).Infof("The instance %s in zone %v", serverWithAttributesExt.Name, zone)
+	return zone, nil
+}
+
+// GetZoneByNodeName implements Zones.GetZoneByNodeName
+// This is particularly useful in external cloud providers where the kubelet
+// does not initialize node data.
+func (os *OpenStack) GetZoneByNodeName(ctx context.Context, nodeName types.NodeName) (cloudprovider.Zone, error) {
+	compute, err := client.NewComputeV2(os.provider, os.epOpts)
+	if err != nil {
+		return cloudprovider.Zone{}, err
+	}
+
+	srv, err := getServerByName(compute, nodeName)
+	if err != nil {
+		if err == errors.ErrNotFound {
+			return cloudprovider.Zone{}, cloudprovider.InstanceNotFound
+		}
+		return cloudprovider.Zone{}, err
+	}
+
+	zone := cloudprovider.Zone{
+		FailureDomain: srv.AvailabilityZone,
+		Region:        os.epOpts.Region,
+	}
+	klog.V(4).Infof("The instance %s in zone %v", srv.Name, zone)
+	return zone, nil
+}
+
+// Routes initializes routes support
+func (os *OpenStack) Routes() (cloudprovider.Routes, bool) {
+	klog.V(4).Info("openstack.Routes() called")
+
+	network, err := client.NewNetworkV2(os.provider, os.epOpts)
+	if err != nil {
+		klog.Errorf("Failed to create an OpenStack Network client: %v", err)
+		return nil, false
+	}
+
+	netExts, err := openstackutil.GetNetworkExtensions(network)
+	if err != nil {
+		klog.Warningf("Failed to list neutron extensions: %v", err)
+		return nil, false
+	}
+
+	if !netExts["extraroute"] && !netExts["extraroute-atomic"] {
+		klog.V(3).Info("Neutron extraroute extension not found, required for Routes support")
+		return nil, false
+	}
+
+	r, err := NewRoutes(os, network, netExts["extraroute-atomic"])
+	if err != nil {
+		klog.Warningf("Error initialising Routes support: %v", err)
+		return nil, false
+	}
+
+	if netExts["extraroute-atomic"] {
+		klog.V(1).Info("Claiming to support Routes with atomic updates")
+	} else {
+		klog.V(1).Info("Claiming to support Routes")
+	}
+
+	return r, true
+}
+
+// SetInformers implements InformerUser interface by setting up informer-fed caches to
+// leverage Kubernetes API for caching
+func (os *OpenStack) SetInformers(informerFactory informers.SharedInformerFactory) {
+	klog.V(1).Infof("Setting up informers for Cloud")
+	os.nodeInformer = informerFactory.Core().V1().Nodes()
+	os.nodeInformerHasSynced = os.nodeInformer.Informer().HasSynced
 }
