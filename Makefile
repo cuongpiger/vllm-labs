@@ -32,7 +32,7 @@ TAR_FILE	?= rootfs.tar
 
 GOOS		?= $(shell go env GOOS)
 GOPROXY		?= $(shell go env GOPROXY)
-VERSION         ?= "latest"
+VERSION         ?= "v0.0.0"
 GOARCH		:=
 GOFLAGS		:=
 TAGS		:=
@@ -117,7 +117,7 @@ shell:
 
 # Build a single image for the local default platform and push to the local
 # container engine
-build-local-image-%:
+build-image-%:
 	$(CONTAINER_ENGINE) buildx build --output type=docker \
 		--build-arg VERSION=$(VERSION) \
 		--tag $(REGISTRY)/$*:$(VERSION) \
