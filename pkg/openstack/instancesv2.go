@@ -109,6 +109,7 @@ func (i *InstancesV2) InstanceShutdown(ctx context.Context, node *v1.Node) (bool
 
 // InstanceMetadata returns the instance's metadata.
 func (i *InstancesV2) InstanceMetadata(ctx context.Context, node *v1.Node) (*cloudprovider.InstanceMetadata, error) {
+	klog.V(4).Infof("openstack.InstanceMetadata() %v", node)
 	srv, err := i.getInstance(ctx, node)
 	if err != nil {
 		return nil, err

@@ -53,7 +53,7 @@ import (
 
 const (
 	// ProviderName is the name of the openstack provider
-	ProviderName = "openstack"
+	ProviderName = "vngcloud"
 
 	// TypeHostName is the name type of openstack instance
 	TypeHostName   = "hostname"
