@@ -1,3 +1,4 @@
 vllm
 huggingface-hub[cli]
 langchain_community
+openai
