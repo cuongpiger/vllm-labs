@@ -91,6 +91,7 @@
   --header 'Content-Type: application/json' \
   --data '{
       "model": "Meta-Llama-3.1-8B-Instruct",
+      "stream": false,
       "messages": [
           {
               "role": "system",
