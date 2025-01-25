@@ -3,6 +3,12 @@
   pip install vllm jinja2 --upgrade
   ```
 
+- To server Llama3.1-8B-Instruct model, you can use the following command:
+  ```bash
+  # vllm serve __MODEL_REPO_PATH__ --dtype auto --port 8000
+  vllm serve Meta-Llama-3.1-8B-Instruct --dtype auto --port 8000
+  ```
+
 - To list all LLM models that the vLLM is hosting, you can use the following command:
   ```bash
   export HOST="__PUT_YOUR_HOST__"
